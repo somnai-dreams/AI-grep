@@ -64,6 +64,12 @@ def init_db(db_path: Path) -> None:
             )
         """)
 
+        # Migration: add source_root column if missing (multi-source support)
+        cursor.execute("PRAGMA table_info(files)")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if columns and "source_root" not in columns:
+            cursor.execute("ALTER TABLE files ADD COLUMN source_root TEXT NOT NULL DEFAULT ''")
+
         conn.commit()
 
 
@@ -78,12 +84,14 @@ def _get_connection(db_path: Path):
         conn.close()
 
 
-def get_indexed_files(db_path: Path) -> dict[str, str]:
+def get_indexed_files(db_path: Path, source_root: str = "") -> dict[str, str]:
     """
-    Get all indexed files with their content hashes.
+    Get indexed files with their content hashes, scoped to a source root.
 
     Args:
         db_path: Path to the SQLite database file
+        source_root: Absolute path of the source directory to scope to.
+                     Empty string returns all files (legacy behaviour).
 
     Returns:
         Dictionary mapping file_path (relative) to content_hash
@@ -94,7 +102,6 @@ def get_indexed_files(db_path: Path) -> dict[str, str]:
     with _get_connection(db_path) as conn:
         cursor = conn.cursor()
 
-        # Check if files table exists
         cursor.execute("""
             SELECT name FROM sqlite_master
             WHERE type='table' AND name='files'
@@ -102,7 +109,13 @@ def get_indexed_files(db_path: Path) -> dict[str, str]:
         if not cursor.fetchone():
             return {}
 
-        cursor.execute("SELECT file_path, content_hash FROM files")
+        if source_root:
+            cursor.execute(
+                "SELECT file_path, content_hash FROM files WHERE source_root = ?",
+                (source_root,)
+            )
+        else:
+            cursor.execute("SELECT file_path, content_hash FROM files")
         rows = cursor.fetchall()
         return {row["file_path"]: row["content_hash"] for row in rows}
 
@@ -292,8 +305,10 @@ def index_files(
         - unchanged: Number of files unchanged
         - errors: List of files that failed to index
     """
-    # Initialize database
+    # Initialize database (runs migration if needed)
     init_db(db_path)
+
+    source_root = str(root_path.resolve())
 
     # Build exclusion patterns
     patterns = list(DEFAULT_EXCLUDES)
@@ -306,7 +321,7 @@ def index_files(
         print(f"Exclusion patterns: {len(patterns)}")
 
     # Get current index state
-    indexed_files = get_indexed_files(db_path)
+    indexed_files = get_indexed_files(db_path, source_root)
     if verbose:
         print(f"Currently indexed: {len(indexed_files)} files")
 
@@ -407,9 +422,9 @@ def index_files(
                 # Insert into files table
                 filename = abs_path.name
                 cursor.execute("""
-                    INSERT INTO files (file_path, filename, file_type, content, content_hash, file_size, indexed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (file_path, filename, file_type, content, content_hash, file_size, now))
+                    INSERT INTO files (file_path, filename, file_type, content, content_hash, file_size, indexed_at, source_root)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (file_path, filename, file_type, content, content_hash, file_size, now, source_root))
 
                 # Get the rowid and insert into FTS
                 rowid = cursor.lastrowid
