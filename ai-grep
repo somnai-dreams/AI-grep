@@ -132,6 +132,20 @@ SEARCH_DIR = Path.cwd() / "SEARCH"
 DB_PATH = SEARCH_DIR / ".vault.db"
 CONFIG_PATH = SEARCH_DIR / "config.json"
 MANIFEST_PATH = SEARCH_DIR / ".vault-manifest.json"
+DIRTY_DIR = Path.cwd() / "dirty"
+
+
+def _get_dirty_aliases() -> set[str]:
+    """Return aliases of sources marked dirty since last index."""
+    if not DIRTY_DIR.exists():
+        return set()
+    return {p.name for p in DIRTY_DIR.iterdir() if p.is_file()}
+
+
+def _clear_dirty(alias: str) -> None:
+    flag = DIRTY_DIR / alias
+    if flag.exists():
+        flag.unlink()
 
 
 def cmd_setup(args):
@@ -237,15 +251,14 @@ def cmd_search(args):
         print(json.dumps({"error": "Query required"}))
         return 1
 
-    # Auto-sync: check if DB is stale and reindex if needed
-    if is_stale(DB_PATH, threshold_minutes=5):
-        print("Updating index... (detecting changes)", file=sys.stderr)
+    # Auto-sync: reindex dirty sources before searching
+    if _get_dirty_aliases():
+        print("Updating index... (dirty sources detected)", file=sys.stderr)
         try:
             args_stub = type("Args", (), {"verbose": False, "force": False})()
             cmd_index(args_stub)
         except Exception as e:
             print(f"Index update failed: {e}", file=sys.stderr)
-            # Continue with search anyway - DB is still usable
 
     # Perform search
     try:
@@ -283,9 +296,22 @@ def cmd_index(args):
         exclude_patterns = config.get("exclude_rules", [])
 
     # Collect all sources: mounted sources, fallback to cwd
-    sources = get_all_source_paths(DB_PATH)
-    if not sources or (len(sources) == 1 and sources[0][1] == "."):
-        sources = [(None, str(Path.cwd()))]
+    all_sources = get_all_source_paths(DB_PATH)
+    if not all_sources or (len(all_sources) == 1 and all_sources[0][1] == "."):
+        all_sources = [(None, str(Path.cwd()))]
+
+    # Filter to dirty sources only (unless --force)
+    force = getattr(args, "force", False)
+    dirty = _get_dirty_aliases()
+    if dirty and not force:
+        sources = [(sid, path) for sid, path in all_sources
+                   if any(path.rstrip("/").endswith("/" + a) or path == a for a in dirty)]
+        if not sources:
+            print(json.dumps({"added": 0, "updated": 0, "deleted": 0, "unchanged": 0, "total": 0, "errors": [],
+                               "skipped": "no dirty sources matched mounted paths"}))
+            return 0
+    else:
+        sources = all_sources
 
     totals: dict = {"added": 0, "updated": 0, "deleted": 0, "unchanged": 0, "total": 0, "errors": []}
 
@@ -303,6 +329,10 @@ def cmd_index(args):
             totals["errors"].extend(result.get("errors", []))
             if source_id is not None:
                 update_source_stats(DB_PATH, source_id, result.get("total", 0))
+            # Clear dirty flag for this source
+            for alias in dirty:
+                if source_path.rstrip("/").endswith("/" + alias) or source_path == alias:
+                    _clear_dirty(alias)
         except Exception as e:
             totals["errors"].append({"path": source_path, "error": str(e)})
 
