@@ -64,11 +64,83 @@ def init_db(db_path: Path) -> None:
             )
         """)
 
-        # Migration: add source_root column if missing (multi-source support)
+        # Migration: ensure files table has source_root and composite unique constraint
         cursor.execute("PRAGMA table_info(files)")
         columns = [row["name"] for row in cursor.fetchall()]
-        if columns and "source_root" not in columns:
-            cursor.execute("ALTER TABLE files ADD COLUMN source_root TEXT NOT NULL DEFAULT ''")
+
+        if columns:
+            needs_source_root = "source_root" not in columns
+            # Check if old single-column unique index exists on file_path
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='files' AND sql LIKE '%file_path%UNIQUE%' OR "
+                "(type='index' AND tbl_name='files' AND name='sqlite_autoindex_files_1')"
+            )
+            has_old_unique = cursor.fetchone() is not None or needs_source_root
+
+            if has_old_unique:
+                # Full table recreation: drop FTS and triggers, recreate with new schema
+                for trigger in ("files_ai", "files_ad", "files_au"):
+                    cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                cursor.execute("DROP TABLE IF EXISTS files_fts")
+
+                cursor.execute("""
+                    CREATE TABLE files_new (
+                        file_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_path TEXT NOT NULL,
+                        filename  TEXT NOT NULL,
+                        file_type TEXT,
+                        content   TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        file_size INTEGER,
+                        modified_at TEXT,
+                        indexed_at TEXT NOT NULL,
+                        source_root TEXT NOT NULL DEFAULT '',
+                        UNIQUE(file_path, source_root)
+                    )
+                """)
+                cursor.execute("""
+                    INSERT INTO files_new
+                        (file_id, file_path, filename, file_type, content, content_hash,
+                         file_size, modified_at, indexed_at, source_root)
+                    SELECT file_id, file_path, filename, file_type, content, content_hash,
+                           file_size, modified_at, indexed_at,
+                           COALESCE(source_root, '') as source_root
+                    FROM files
+                """)
+                cursor.execute("DROP TABLE files")
+                cursor.execute("ALTER TABLE files_new RENAME TO files")
+
+                # Recreate FTS virtual table
+                cursor.execute("""
+                    CREATE VIRTUAL TABLE files_fts USING fts5(
+                        file_path, filename, content,
+                        content='files', content_rowid='file_id',
+                        tokenize='porter unicode61'
+                    )
+                """)
+                cursor.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+
+                # Recreate triggers
+                cursor.execute("""
+                    CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+                        INSERT INTO files_fts(rowid, file_path, filename, content)
+                        VALUES (NEW.file_id, NEW.file_path, NEW.filename, NEW.content);
+                    END
+                """)
+                cursor.execute("""
+                    CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+                        INSERT INTO files_fts(files_fts, rowid, file_path, filename, content)
+                        VALUES ('delete', OLD.file_id, OLD.file_path, OLD.filename, OLD.content);
+                    END
+                """)
+                cursor.execute("""
+                    CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
+                        INSERT INTO files_fts(files_fts, rowid, file_path, filename, content)
+                        VALUES ('delete', OLD.file_id, OLD.file_path, OLD.filename, OLD.content);
+                        INSERT INTO files_fts(rowid, file_path, filename, content)
+                        VALUES (NEW.file_id, NEW.file_path, NEW.filename, NEW.content);
+                    END
+                """)
 
         conn.commit()
 
@@ -375,8 +447,8 @@ def index_files(
             # Delete removed files from FTS first, then from files table
             for file_path in to_delete:
                 cursor.execute(
-                    "SELECT file_id FROM files WHERE file_path = ?",
-                    (file_path,)
+                    "SELECT file_id FROM files WHERE file_path = ? AND source_root = ?",
+                    (file_path, source_root)
                 )
                 row = cursor.fetchone()
                 if row:
@@ -384,13 +456,16 @@ def index_files(
                         "INSERT INTO files_fts(files_fts, rowid, file_path, content) VALUES('delete', ?, ?, ?)",
                         (row["file_id"], file_path, "")
                     )
-                cursor.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
+                cursor.execute(
+                    "DELETE FROM files WHERE file_path = ? AND source_root = ?",
+                    (file_path, source_root)
+                )
 
             # Delete changed files from FTS before re-inserting
             for file_path in to_update:
                 cursor.execute(
-                    "SELECT file_id FROM files WHERE file_path = ?",
-                    (file_path,)
+                    "SELECT file_id FROM files WHERE file_path = ? AND source_root = ?",
+                    (file_path, source_root)
                 )
                 row = cursor.fetchone()
                 if row:
@@ -401,7 +476,10 @@ def index_files(
                     )
                     # Delete old sections (CASCADE should handle this, but explicit for safety)
                     cursor.execute("DELETE FROM file_sections WHERE file_id = ?", (file_id,))
-                cursor.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
+                cursor.execute(
+                    "DELETE FROM files WHERE file_path = ? AND source_root = ?",
+                    (file_path, source_root)
+                )
 
             # Insert new and updated files
             now = datetime.now().isoformat()
