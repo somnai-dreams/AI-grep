@@ -40,12 +40,79 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from vault_lib.sources import get_all_source_paths
+
 # Constants
 DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_CONTEXT_LINES = 3
 DEFAULT_SNIPPET_CHARS = 300
 RECENCY_DECAY_FACTOR = 0.01  # Score boost decay per day
 DATE_DISCREPANCY_THRESHOLD_DAYS = 30  # Flag if mtime and content dates differ by this much
+
+
+# =============================================================================
+# Alias / Synonym Expansion
+# =============================================================================
+
+def load_aliases(search_dir: Path) -> dict[str, list[str]]:
+    """
+    Load search aliases from SEARCH/.searchaliases.
+
+    Format (one alias per line):
+        # comment
+        your_term: codebase_term1, codebase_term2, ...
+
+    Example:
+        auth: authentication, login, oauth, jwt, session
+        db: database, sql, sqlite, query, orm
+    """
+    aliases: dict[str, list[str]] = {}
+    aliases_path = search_dir / ".searchaliases"
+    if not aliases_path.exists():
+        return aliases
+    for line in aliases_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, values = line.partition(":")
+        key = key.strip().lower()
+        synonyms = [v.strip() for v in values.split(",") if v.strip()]
+        if key and synonyms:
+            aliases[key] = synonyms
+    return aliases
+
+
+def expand_query(query: str, aliases: dict[str, list[str]]) -> tuple[str, str]:
+    """
+    Expand a query using aliases, returning (fts_query, rg_pattern).
+
+    For each word in the query that matches an alias key, its synonyms are
+    added as OR alternatives.
+
+    fts_query  — space-separated OR terms for SQLite FTS5
+    rg_pattern — regex alternation for ripgrep
+    """
+    if not aliases:
+        return query, query
+
+    all_terms: list[str] = [query]
+    for word in query.lower().split():
+        if word in aliases:
+            all_terms.extend(aliases[word])
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in all_terms:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            unique.append(t)
+
+    fts_query = " OR ".join(unique)
+    rg_pattern = "|".join(re.escape(t) for t in unique)
+    return fts_query, rg_pattern
 
 
 # =============================================================================
@@ -1040,7 +1107,7 @@ def _find_line_number_in_content(content: str, snippet: str) -> int:
 
 
 def search_ripgrep(
-    root_path: Path,
+    root_paths: "Path | list[Path]",
     query: str,
     limit: int = DEFAULT_SEARCH_LIMIT,
     exclude_patterns: Optional[list[str]] = None,
@@ -1074,7 +1141,9 @@ def search_ripgrep(
             "ripgrep (rg) not found. Install with: sudo apt install ripgrep"
         )
 
-    if not root_path.exists():
+    paths = root_paths if isinstance(root_paths, list) else [root_paths]
+    paths = [p for p in paths if Path(p).exists()]
+    if not paths:
         return []
 
     # Build ripgrep command
@@ -1097,7 +1166,7 @@ def search_ripgrep(
     for pattern in default_excludes:
         rg_args.extend(["--glob", f"!{pattern}"])
 
-    rg_args.extend([query, str(root_path)])
+    rg_args.extend([query] + [str(p) for p in paths])
 
     try:
         result = subprocess.run(
@@ -1224,20 +1293,22 @@ def search_combined(
     limit: int = DEFAULT_SEARCH_LIMIT,
     exclude_patterns: Optional[list[str]] = None,
     recency_boost: bool = True,
+    aliases: Optional[dict[str, list[str]]] = None,
 ) -> dict:
     """
     Combined search using both FTS5 and ripgrep for maximum recall.
 
-    Runs both search methods, deduplicates by filepath, and merges scores.
-    Results found by both methods get a bonus.
+    Searches all mounted sources (via sources table) in addition to root_path.
+    Supports alias/synonym expansion via the aliases dict.
 
     Args:
-        root_path: Root directory for ripgrep search
+        root_path: Fallback root directory if no sources are mounted
         db_path: Path to SQLite database for FTS search
         query: Search query
         limit: Maximum results to return
         exclude_patterns: Glob patterns to exclude from ripgrep
         recency_boost: Apply recency boost (default True)
+        aliases: Optional synonym map from load_aliases()
 
     Returns:
         Dictionary with:
@@ -1248,25 +1319,35 @@ def search_combined(
     """
     query = validate_query(query)
 
+    # Expand query with aliases
+    fts_query, rg_pattern = expand_query(query, aliases or {})
+
+    # Collect all source paths to search
+    source_entries = get_all_source_paths(db_path)
+    if source_entries and not (len(source_entries) == 1 and source_entries[0][1] == "."):
+        rg_paths = [Path(p) for _, p in source_entries]
+    else:
+        rg_paths = [root_path]
+
     fts_results: list[FileSearchResult] = []
     ripgrep_results: list[FileSearchResult] = []
     fts_error: Optional[str] = None
     ripgrep_error: Optional[str] = None
 
-    # Run FTS search
+    # Run FTS search (already covers all indexed sources in the DB)
     try:
         fts_results = search_fts(
-            db_path, query, limit=limit * 2, recency_boost=recency_boost
+            db_path, fts_query, limit=limit * 2, recency_boost=recency_boost
         )
     except DatabaseNotInitializedError as e:
         fts_error = str(e)
     except Exception as e:
         fts_error = f"FTS search failed: {e}"
 
-    # Run ripgrep search
+    # Run ripgrep search across all source paths
     try:
         ripgrep_results = search_ripgrep(
-            root_path, query, limit=limit * 2,
+            rg_paths, rg_pattern, limit=limit * 2,
             exclude_patterns=exclude_patterns,
             db_path=db_path,  # Pass db_path for file_sections lookup
         )
