@@ -120,7 +120,7 @@ from vault_lib.index import init_db, index_files, is_stale, get_index_stats
 # New module imports for enhanced features
 from vault_lib.analysis import cmd_stats, cmd_timeline, cmd_tags, cmd_outline, cmd_toc
 from vault_lib.similarity import cmd_related, cmd_duplicates, cmd_links, cmd_refs
-from vault_lib.sources import cmd_mount, cmd_sources, cmd_unmount, ensure_sources_schema, get_all_source_paths, update_source_stats
+from vault_lib.sources import cmd_mount, cmd_sources, cmd_unmount, ensure_sources_schema, get_all_source_paths, update_source_stats, _sources_json_path
 from vault_lib.export import cmd_export, cmd_clip, cmd_open, cmd_history, log_query
 from vault_lib.search import cmd_diff, cmd_grep_context, cmd_relevant
 from vault_lib.search import search_combined, search_fts, search_ripgrep
@@ -839,6 +839,38 @@ def cmd_unmount_handler(args):
     return 0 if result["success"] else 1
 
 
+def cmd_remount_handler(args):
+    """Re-mount all sources from sources.json after a DB wipe."""
+    db_path = Path.cwd() / "SEARCH" / ".vault.db"
+    sources_file = _sources_json_path(db_path)
+
+    if not sources_file.exists():
+        print("No sources.json found — nothing to remount.")
+        print("Hint: mount sources first with 'ai-grep mount <path> <alias>'")
+        return 1
+
+    entries = json.loads(sources_file.read_text())
+    if not entries:
+        print("sources.json is empty — nothing to remount.")
+        return 0
+
+    print(f"Remounting {len(entries)} source(s)...")
+    for entry in entries:
+        alias = entry["alias"]
+        path = entry["path"]
+        result = cmd_mount(db_path, path, alias)
+        if result["success"]:
+            print(f"  mounted: {alias} -> {path}")
+        elif "already" in (result.get("error") or ""):
+            print(f"  already mounted: {alias}")
+        else:
+            print(f"  failed: {alias}: {result.get('error')}")
+
+    print("\nIndexing all sources...")
+    cmd_index(args)
+    return 0
+
+
 # ============================================================================
 # Export & Integration Commands (Track 4)
 # ============================================================================
@@ -1125,6 +1157,9 @@ def main():
     p_unmount = subparsers.add_parser('unmount', help='Remove directory from index')
     p_unmount.add_argument('alias', nargs='?', help='Alias of source to unmount')
 
+    # remount - restore all sources from sources.json after a DB wipe
+    subparsers.add_parser('remount', help='Re-mount all sources from sources.json and reindex')
+
     # ========================================================================
     # EXPORT & INTEGRATION COMMANDS (Track 4)
     # ========================================================================
@@ -1203,6 +1238,7 @@ def main():
         'mount': cmd_mount_handler,
         'sources': cmd_sources_handler,
         'unmount': cmd_unmount_handler,
+        'remount': cmd_remount_handler,
         # Export commands (Track 4)
         'export': cmd_export_handler,
         'clip': cmd_clip_handler,

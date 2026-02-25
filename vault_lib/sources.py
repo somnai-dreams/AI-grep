@@ -32,11 +32,29 @@ Usage:
     result = cmd_unmount(db_path, "docs")
 """
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+def _sources_json_path(db_path: Path) -> Path:
+    """~/.ai-grep/sources.json — persists across DB wipes."""
+    return db_path.parent.parent / "sources.json"
+
+
+def _save_sources_json(db_path: Path) -> None:
+    """Write current sources table to sources.json."""
+    try:
+        with _get_connection(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT alias, absolute_path FROM sources ORDER BY alias")
+            entries = [{"alias": r["alias"], "path": r["absolute_path"]} for r in cursor.fetchall()]
+        _sources_json_path(db_path).write_text(json.dumps(entries, indent=2))
+    except Exception:
+        pass  # Never let JSON sync failure break the main operation
 
 
 @contextmanager
@@ -233,6 +251,9 @@ def cmd_mount(db_path: Path, path: str, alias: str) -> dict:
     except sqlite3.Error as e:
         result["error"] = f"Database error: {e}"
         result["message"] = f"Error: Database error: {e}"
+
+    if result["success"]:
+        _save_sources_json(db_path)
 
     return result
 
@@ -443,6 +464,9 @@ def cmd_unmount(db_path: Path, alias: str) -> dict:
     except sqlite3.Error as e:
         result["error"] = f"Database error: {e}"
         result["message"] = f"Error: Database error: {e}"
+
+    if result["success"]:
+        _save_sources_json(db_path)
 
     return result
 
