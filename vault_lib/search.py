@@ -42,6 +42,13 @@ from typing import Optional
 
 from vault_lib.sources import get_all_source_paths
 
+def _get_connection(db_path: Path):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 # Constants
 DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_CONTEXT_LINES = 3
@@ -160,8 +167,7 @@ def get_section_for_match(db_path: Path, file_id: int, line_number: int) -> Opti
         return None
 
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _get_connection(db_path)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT section_date, section_header, section_type, line_start, line_end
@@ -202,8 +208,7 @@ def get_entry_dates_for_matches(db_path: Path, file_id: int, line_numbers: list[
         return []
 
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _get_connection(db_path)
         cursor = conn.cursor()
 
         # For each line number, find the containing section
@@ -1012,8 +1017,7 @@ def search_fts(
     results = []
 
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _get_connection(db_path)
         cursor = conn.cursor()
 
         # Build query with BM25 ranking
@@ -1613,8 +1617,7 @@ def cmd_diff(root_path: Path, db_path: Path) -> dict:
 
     # Get last indexed timestamp from manifest
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _get_connection(db_path)
         cursor = conn.cursor()
 
         cursor.execute("""

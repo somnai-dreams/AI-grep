@@ -435,6 +435,8 @@ def _init_search_db(db_path: Path) -> None:
         db_path: Path to the database file
     """
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     cursor = conn.cursor()
 
     # Files table - metadata about indexed files
