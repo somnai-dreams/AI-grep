@@ -306,8 +306,8 @@ def cmd_sources(db_path: Path) -> dict:
             # Also get actual file counts from files table (more accurate)
             for source in sources:
                 cursor.execute(
-                    "SELECT COUNT(*) as count FROM files WHERE source_id = ?",
-                    (source["source_id"],)
+                    "SELECT COUNT(*) as count FROM files WHERE source_root = ?",
+                    (source["absolute_path"],)
                 )
                 count_row = cursor.fetchone()
                 if count_row:
