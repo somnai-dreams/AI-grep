@@ -121,7 +121,6 @@ from vault_lib.index import init_db, index_files, is_stale, get_index_stats
 from vault_lib.analysis import cmd_stats, cmd_timeline, cmd_tags, cmd_outline, cmd_toc
 from vault_lib.similarity import cmd_related, cmd_duplicates, cmd_links, cmd_refs
 from vault_lib.sources import cmd_mount, cmd_sources, cmd_unmount, ensure_sources_schema, get_all_source_paths, update_source_stats
-from vault_lib.search import load_aliases, expand_query
 from vault_lib.export import cmd_export, cmd_clip, cmd_open, cmd_history, log_query
 from vault_lib.search import cmd_diff, cmd_grep_context, cmd_relevant
 from vault_lib.search import search_combined, search_fts, search_ripgrep
@@ -248,9 +247,6 @@ def cmd_search(args):
             print(f"Index update failed: {e}", file=sys.stderr)
             # Continue with search anyway - DB is still usable
 
-    # Load aliases for query expansion
-    aliases = load_aliases(SEARCH_DIR)
-
     # Perform search
     try:
         output = search_combined(
@@ -258,7 +254,6 @@ def cmd_search(args):
             DB_PATH,
             args.query,
             limit=args.limit,
-            aliases=aliases,
         )
 
         print(json.dumps(output, indent=2))

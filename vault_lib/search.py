@@ -54,9 +54,9 @@ DATE_DISCREPANCY_THRESHOLD_DAYS = 30  # Flag if mtime and content dates differ b
 # Alias / Synonym Expansion
 # =============================================================================
 
-def load_aliases(search_dir: Path) -> dict[str, list[str]]:
+def load_aliases(path: Path) -> dict[str, list[str]]:
     """
-    Load search aliases from SEARCH/.searchaliases.
+    Load search aliases from a .searchaliases file.
 
     Format (one alias per line):
         # comment
@@ -67,10 +67,10 @@ def load_aliases(search_dir: Path) -> dict[str, list[str]]:
         db: database, sql, sqlite, query, orm
     """
     aliases: dict[str, list[str]] = {}
-    aliases_path = search_dir / ".searchaliases"
-    if not aliases_path.exists():
+    aliases_file = path / ".searchaliases" if path.is_dir() else path
+    if not aliases_file.exists():
         return aliases
-    for line in aliases_path.read_text().splitlines():
+    for line in aliases_file.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -82,6 +82,23 @@ def load_aliases(search_dir: Path) -> dict[str, list[str]]:
         if key and synonyms:
             aliases[key] = synonyms
     return aliases
+
+
+def load_all_aliases(db_path: Path, source_paths: list[str]) -> dict[str, list[str]]:
+    """
+    Merge aliases from all sources:
+    - Global: db_path.parent/.searchaliases  (e.g. ~/.ai-grep/SEARCH/)
+    - Per-project: <source_root>/.searchaliases for each mounted project
+
+    Project aliases take precedence over global ones for the same key.
+    """
+    # Global aliases: ~/.ai-grep/.searchaliases (parent of SEARCH/)
+    merged = load_aliases(db_path.parent.parent)
+    # Per-project aliases override global (each project owns its own terms)
+    for source_path in source_paths:
+        project_aliases = load_aliases(Path(source_path))
+        merged.update(project_aliases)
+    return merged
 
 
 def expand_query(query: str, aliases: dict[str, list[str]]) -> tuple[str, str]:
@@ -1319,15 +1336,17 @@ def search_combined(
     """
     query = validate_query(query)
 
-    # Expand query with aliases
-    fts_query, rg_pattern = expand_query(query, aliases or {})
-
     # Collect all source paths to search
     source_entries = get_all_source_paths(db_path)
     if source_entries and not (len(source_entries) == 1 and source_entries[0][1] == "."):
         rg_paths = [Path(p) for _, p in source_entries]
     else:
         rg_paths = [root_path]
+
+    # Merge aliases: global (~/.ai-grep/SEARCH/) + per-project (each source root)
+    # Caller-supplied aliases are ignored in favour of file-based ones
+    merged_aliases = load_all_aliases(db_path, [str(p) for p in rg_paths])
+    fts_query, rg_pattern = expand_query(query, merged_aliases)
 
     fts_results: list[FileSearchResult] = []
     ripgrep_results: list[FileSearchResult] = []
