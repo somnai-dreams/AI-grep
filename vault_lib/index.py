@@ -327,6 +327,15 @@ def _get_file_type(file_path: Path) -> str:
     return type_map.get(ext, "unknown")
 
 
+def _is_binary(file_path: Path) -> bool:
+    """Check if a file is binary by sniffing the first 8KB for null bytes."""
+    try:
+        chunk = file_path.read_bytes()[:8192]
+        return b"\x00" in chunk
+    except Exception:
+        return False
+
+
 def _read_file_content(file_path: Path) -> Optional[str]:
     """
     Read file content as text, handling encoding errors.
@@ -487,18 +496,23 @@ def index_files(
 
             for file_path in files_to_insert:
                 abs_path = root_path / file_path
-                content = _read_file_content(abs_path)
-
-                if content is None:
-                    errors.append({"file": file_path, "error": "Could not read file content"})
-                    continue
-
-                file_type = _get_file_type(abs_path)
                 file_size = abs_path.stat().st_size
                 content_hash = current_files[file_path]
+                filename = abs_path.name
+
+                if _is_binary(abs_path):
+                    file_type = "binary"
+                    content = ""
+                    sections = []
+                else:
+                    content = _read_file_content(abs_path)
+                    if content is None:
+                        errors.append({"file": file_path, "error": "Could not read file content"})
+                        continue
+                    file_type = _get_file_type(abs_path)
+                    sections = extract_sections(content, file_type)
 
                 # Insert into files table
-                filename = abs_path.name
                 cursor.execute("""
                     INSERT INTO files (file_path, filename, file_type, content, content_hash, file_size, indexed_at, source_root)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -511,8 +525,7 @@ def index_files(
                     VALUES (?, ?, ?, ?)
                 """, (rowid, file_path, filename, content))
 
-                # Extract and insert sections for all text-based files
-                sections = extract_sections(content, file_type)
+                # Extract and insert sections for text files
                 for section in sections:
                     cursor.execute("""
                         INSERT INTO file_sections (file_id, line_start, line_end, section_date, section_header, section_type)
