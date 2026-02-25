@@ -441,14 +441,16 @@ def _init_search_db(db_path: Path) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
             file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT UNIQUE NOT NULL,
+            file_path TEXT NOT NULL,
             filename TEXT NOT NULL,
             file_type TEXT,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             file_size INTEGER,
             modified_at TEXT,
-            indexed_at TEXT NOT NULL
+            indexed_at TEXT NOT NULL,
+            source_root TEXT NOT NULL DEFAULT '',
+            UNIQUE(file_path, source_root)
         )
     """)
 
